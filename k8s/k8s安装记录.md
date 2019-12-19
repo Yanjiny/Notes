@@ -1,20 +1,15 @@
 # 安装记录
 
-### 服务器配置信息
+https://blog.csdn.net/fy_long/article/details/88829070
 
-```Shell
-虚拟机： VM14
-系统： Centos7
-master  k8s1 4G 4Core  192.168.233.129
-node1   k8s2 4G 4Core  192.168.233.130
-node2   k8s3 4G 4Core  192.168.233.131
-```
+https://www.kubernetes.org.cn/5462.html
 
 ## 1、设置主机名
 
 ```shell
 hostnamectl set-hostname k8s1
 hostnamectl set-hostname k8s2
+hostnamectl set-hostname k8s3
 ```
 
 ## 2、修改host文件 
@@ -27,314 +22,398 @@ cat >> /etc/hosts <<EOF
 EOF
 ```
 
-## 3、关闭selinux
+## 3、关闭防火墙、selinux和swap
 
 ```shell
-setenforce 0 #实时动态关闭
-sed -i 's/SELINUX=enforcing/SELINUX=disabled/' /etc/selinux/config #禁止重启后自动开启
+systemctl stop firewalld
+systemctl disable firewalld
+setenforce 0
+sed -i "s/^SELINUX=enforcing/SELINUX=disabled/g" /etc/selinux/config
+swapoff -a
+sed -i 's/.*swap.*/#&/' /etc/fstab
 ```
 
-## 4、关闭交换分区
+## 4、配置内核参数，将桥接的IPv4流量传递到iptables的链
 
 ```shell
-swapoff -a #实时动态关闭
-sed -i '/ swap / s/^/#/' /etc/fstab #禁止重启后自动开启
-```
-
-## 5、网络配置文件
-
-```shell
-cat >> /etc/sysctl.d/k8s.conf <<EOF
+cat > /etc/sysctl.d/k8s.conf <<EOF
 net.bridge.bridge-nf-call-ip6tables = 1
 net.bridge.bridge-nf-call-iptables = 1
-net.ipv4.ip_forward = 1
-vm.swappiness=0
 EOF
-
-modprobe br_netfilter  #执行该命令 如果不执行就会在应用k8s.conf时出现加载错误
-
-sysctl -p /etc/sysctl.d/k8s.conf #应用配置文件
-
+sysctl --system
 ```
 
-## 6、配置资源地址
+## 5、配置国内yum源
 
 ```shell
-yum install wget -y  #安装wget命令行
-
-wget -O /etc/yum.repos.d/CentOS-Base.repo http://mirrors.aliyun.com/repo/Centos-7.repo  #配置yum源
-
-yum makecache #更新缓存
-
-yum install -y yum-utils device-mapper-persistent-data lvm2 #安装yum扩展工具
-
-yum-config-manager --add-repo http://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo #配置docker下载的地址
+yum install -y wget
+mkdir /etc/yum.repos.d/bak && mv /etc/yum.repos.d/*.repo /etc/yum.repos.d/bak
+wget -O /etc/yum.repos.d/CentOS-Base.repo http://mirrors.cloud.tencent.com/repo/centos7_base.repo
+wget -O /etc/yum.repos.d/epel.repo http://mirrors.cloud.tencent.com/repo/epel-7.repo
+yum clean all && yum makecache
 ```
 
-## 7、安装Docker
-
-```shell
-yum list docker-ce --showduplicates|sort -r  #展示版本列表
-
-yum install –y docker-ce  #默认安装最新版，也可以指定版本下载
-
-systemctl start docker #启动docker
-systemctl enable docker #将docker加入到开机启动
-
-docker version #查看docker启动情况 和版本信息
-```
-
-## 8、配置k8s资源的下载地址
+## 6、配置国内Kubernetes源
 
 ```shell
 cat <<EOF > /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
-baseurl=http://mirrors.aliyun.com/kubernetes/yum/repos/kubernetes-el7-x86_64
+baseurl=https://mirrors.aliyun.com/kubernetes/yum/repos/kubernetes-el7-x86_64/
 enabled=1
-gpgcheck=0
-repo_gpgcheck=0
-gpgkey=http://mirrors.aliyun.com/kubernetes/yum/doc/yum-key.gpg
-        http://mirrors.aliyun.com/kubernetes/yum/doc/rpm-package-key.gpg
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://mirrors.aliyun.com/kubernetes/yum/doc/yum-key.gpg https://mirrors.aliyun.com/kubernetes/yum/doc/rpm-package-key.gpg
 EOF
 ```
 
-## 9、安装 kubelet kubeadm kubectl
+## 7、配置 docker 源
 
 ```shell
-yum install -y kubelet-1.15.1 kubeadm-1.15.1 kubectl-1.15.1
-systemctl enable kubelet.service #开机启动
-systemctl enable kubectl.service
+wget https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo -O /etc/yum.repos.d/docker-ce.repo
 ```
 
-## 10、查看kubeadm config所需的镜像
+## 8、安装docker
 
 ```shell
-kubeadm config images list
-
-k8s.gcr.io/kube-apiserver:v1.15.2
-k8s.gcr.io/kube-controller-manager:v1.15.2
-k8s.gcr.io/kube-scheduler:v1.15.2
-k8s.gcr.io/kube-proxy:v1.15.2
-k8s.gcr.io/pause:3.1
-k8s.gcr.io/etcd:3.3.10
-k8s.gcr.io/coredns:1.3.1
-
+yum install -y docker-ce-18.06.1.ce-3.el7
+#设置开机自动启动
+systemctl enable docker && systemctl start docker
 ```
 
-## 11、使用github与dockerhub制作以上镜像
+## 9、安装kubeadm、kubelet、kubectl
 
 ```shell
-#由于外网的限制，且没有科学上网的条件，所以通过DockerHub拉取指定k8s所需镜像，具体方法为使用gitHub帐户关联DockerHub制作df利用dokcerhub的自动构建拉取我们k8s需要的镜像文件
-#制作DockerFile
-From k8s.gcr.io/kube-apiserver:v1.15.1
-MAINTAINER yanjy <1207778252@qq.com>
+yum install -y kubelet kubeadm kubectl etcd
+systemctl enable kubelet
 ```
 
-## 12、拉取镜像
+## 10、部署master 节点
 
 ```shell
-docker pull 1207778252/kube-proxy:latest
-docker pull 1207778252/kube-apiserver:latest
-docker pull 1207778252/kube-controller-manager:latest
-docker pull 1207778252/kube-scheduler:latest
-docker pull 1207778252/pause:latest
-docker pull 1207778252/etcd:latest
-docker pull 1207778252/coredns:latest
-#打新标签
-docker tag 1207778252/kube-proxy:latest k8s.gcr.io/kube-proxy:v1.15.2
-docker tag 1207778252/kube-apiserver:latest k8s.gcr.io/kube-apiserver:v1.15.2
-docker tag 1207778252/kube-controller-manager:latest k8s.gcr.io/kube-controller-manager:v1.15.2
-docker tag 1207778252/kube-scheduler:latest k8s.gcr.io/kube-scheduler:v1.15.2
-docker tag 1207778252/pause:latest k8s.gcr.io/pause:3.1
-docker tag 1207778252/etcd:latest k8s.gcr.io/etcd:3.3.10
-docker tag 1207778252/coredns:latest k8s.gcr.io/coredns:1.3.1
+kubeadm init --kubernetes-version=1.15.2 \
+--apiserver-advertise-address=192.168.233.129 \
+--image-repository registry.aliyuncs.com/google_containers \
+--service-cidr=10.1.0.0/16 \
+--pod-network-cidr=192.168.0.0/16
 
+--apiserver-advertise-address 为master节点ip
+--image-repository 指定为阿里镜像地址目录 例如registry:5000
+--pod-network-cidr 指定创建的pod的ip段，如果网络使用calico要与calico配置一致
 ```
 
+报错
+
 ```shell
-#关闭防火墙
-firewall-cmd --state
-systemctl disable firewalld.service 
+[WARNING IsDockerSystemdCheck]: detected "cgroupfs" as the Docker cgroup driver. The recommended driver is "systemd". Please follow the guide at https://kubernetes.io/docs/setup/cri/
+error execution phase preflight: [preflight] Some fatal errors occurred:
+        [ERROR FileContent--proc-sys-net-ipv4-ip_forward]: /proc/sys/net/ipv4/ip_forward contents are not set to 1
+
+
+cat > /etc/default/kubelet << EOF
+Environment=
+KUBELET_EXTRA_ARGS=--cgroup-driver=systemd
+EOF
+systemctl restart docker
 ```
 
 
 
-## 13、开始初始化 （只在主节点Master上面 操作）
+```shell
+##执行后输出，在node节点执行可以加入到集群
+kubeadm join 192.168.233.129:6443 --token is7akj.0a91xymeqmijka65 \
+    --discovery-token-ca-cert-hash sha256:abe6f4a45a31ca4747686f27c0fbc3849750787ea79de09f70a9ea84b0db800d
+
+```
+
+## 11、配置kubectl工具
 
 ```shell
-#只在Master的主机上面执行 版本信息与你要安装的相同
-kubeadm init --kubernetes-version=v1.15.2 --pod-network-cidr=192.244.0.0/16 --apiserver-advertise-address=192.168.233.129 
-
-#当出现 类似 如下说明 master 安装成功
-kubeadm join 192.168.233.129:6443 --token r6vo99.ixkb27zv3o9e154m \
-    --discovery-token-ca-cert-hash sha256:0a2641c6af4e107c83022372bade060e526cb64aa768e9d15968ffe84ad9dcd3
-
-#然后执行 安装成功提示的 命令行  这部分执行你安装成功后的部分 可能每个人的有所不同
 mkdir -p $HOME/.kube
 sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
+##查看节点状态
+kubectl get nodes
+kubectl get cs
 ```
 
+## 12、部署flannel网络
+
 ```shell
-#执行init后输出的日志
-[init] Using Kubernetes version: v1.15.2
-[preflight] Running pre-flight checks
-        [WARNING Firewalld]: firewalld is active, please ensure ports [6443 10250] are open or your cluster may not function correctly
-        [WARNING IsDockerSystemdCheck]: detected "cgroupfs" as the Docker cgroup driver. The recommended driver is "systemd". Please follow the guide at https://kubernetes.io/docs/setup/cri/
-        [WARNING SystemVerification]: this Docker version is not on the list of validated versions: 19.03.1. Latest validated version: 18.09
-[preflight] Pulling images required for setting up a Kubernetes cluster
-[preflight] This might take a minute or two, depending on the speed of your internet connection
-[preflight] You can also perform this action in beforehand using 'kubeadm config images pull'
-[kubelet-start] Writing kubelet environment file with flags to file "/var/lib/kubelet/kubeadm-flags.env"
-[kubelet-start] Writing kubelet configuration to file "/var/lib/kubelet/config.yaml"
-[kubelet-start] Activating the kubelet service
-[certs] Using certificateDir folder "/etc/kubernetes/pki"
-[certs] Generating "ca" certificate and key
-[certs] Generating "apiserver" certificate and key
-[certs] apiserver serving cert is signed for DNS names [k8s1 kubernetes kubernetes.default kubernetes.default.svc kubernetes.default.svc.cluster.local] and IPs [10.96.0.1 192.168.233.129]
-[certs] Generating "apiserver-kubelet-client" certificate and key
-[certs] Generating "front-proxy-ca" certificate and key
-[certs] Generating "front-proxy-client" certificate and key
-[certs] Generating "etcd/ca" certificate and key
-[certs] Generating "etcd/healthcheck-client" certificate and key
-[certs] Generating "apiserver-etcd-client" certificate and key
-[certs] Generating "etcd/server" certificate and key
-[certs] etcd/server serving cert is signed for DNS names [k8s1 localhost] and IPs [192.168.233.129 127.0.0.1 ::1]
-[certs] Generating "etcd/peer" certificate and key
-[certs] etcd/peer serving cert is signed for DNS names [k8s1 localhost] and IPs [192.168.233.129 127.0.0.1 ::1]
-[certs] Generating "sa" key and public key
-[kubeconfig] Using kubeconfig folder "/etc/kubernetes"
-[kubeconfig] Writing "admin.conf" kubeconfig file
-[kubeconfig] Writing "kubelet.conf" kubeconfig file
-[kubeconfig] Writing "controller-manager.conf" kubeconfig file
-[kubeconfig] Writing "scheduler.conf" kubeconfig file
-[control-plane] Using manifest folder "/etc/kubernetes/manifests"
-[control-plane] Creating static Pod manifest for "kube-apiserver"
-[control-plane] Creating static Pod manifest for "kube-controller-manager"
-[control-plane] Creating static Pod manifest for "kube-scheduler"
-[etcd] Creating static Pod manifest for local etcd in "/etc/kubernetes/manifests"
-[wait-control-plane] Waiting for the kubelet to boot up the control plane as static Pods from directory "/etc/kubernetes/manifests". This can take up to 4m0s
-[apiclient] All control plane components are healthy after 20.506985 seconds
-[upload-config] Storing the configuration used in ConfigMap "kubeadm-config" in the "kube-system" Namespace
-[kubelet] Creating a ConfigMap "kubelet-config-1.15" in namespace kube-system with the configuration for the kubelets in the cluster
-[upload-certs] Skipping phase. Please see --upload-certs
-[mark-control-plane] Marking the node k8s1 as control-plane by adding the label "node-role.kubernetes.io/master=''"
-[mark-control-plane] Marking the node k8s1 as control-plane by adding the taints [node-role.kubernetes.io/master:NoSchedule]
-[bootstrap-token] Using token: r6vo99.ixkb27zv3o9e154m
-[bootstrap-token] Configuring bootstrap tokens, cluster-info ConfigMap, RBAC Roles
-[bootstrap-token] configured RBAC rules to allow Node Bootstrap tokens to post CSRs in order for nodes to get long term certificate credentials
-[bootstrap-token] configured RBAC rules to allow the csrapprover controller automatically approve CSRs from a Node Bootstrap Token
-[bootstrap-token] configured RBAC rules to allow certificate rotation for all node client certificates in the cluster
-[bootstrap-token] Creating the "cluster-info" ConfigMap in the "kube-public" namespace
-[addons] Applied essential addon: CoreDNS
-[addons] Applied essential addon: kube-proxy
+kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/a70459be0084506e4ec919aa1c114638878db11b/Documentation/kube-flannel.yml
+```
 
-Your Kubernetes control-plane has initialized successfully!
+calico
 
-To start using your cluster, you need to run the following as a regular user:
+```yaml
+kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/a70459be0084506e4ec919aa1c114638878db11b/Documentation/kube-flannel.yml
+```
 
-  mkdir -p $HOME/.kube
-  sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
-  sudo chown $(id -u):$(id -g) $HOME/.kube/config
+## 13、部署Dashboard
 
-You should now deploy a pod network to the cluster.
-Run "kubectl apply -f [podnetwork].yaml" with one of the options listed at:
-  https://kubernetes.io/docs/concepts/cluster-administration/addons/
-
-Then you can join any number of worker nodes by running the following on each as root:
-
-kubeadm join 192.168.233.129:6443 --token r6vo99.ixkb27zv3o9e154m \
-    --discovery-token-ca-cert-hash sha256:0a2641c6af4e107c83022372bade060e526cb64aa768e9d15968ffe84ad9dcd3
+```shell
+#在master节点上进行如下操作
+wget https://raw.githubusercontent.com/kubernetes/dashboard/v1.10.1/src/deploy/recommended/kubernetes-dashboard.yaml
+##不支持科学上网，所以需要修改kubernetes-dashboard.yaml中的镜像地址，在阿里云或则dockerhub找到对应的镜像
+## 比如：registry.cn-hangzhou.aliyuncs.com/lusifeng/kubernetes-dashboard-amd64:v1.10.1
 
 ```
 
+![1565365805081](C:\Users\yanjiny\AppData\Roaming\Typora\typora-user-images\1565365805081.png)
 
+此外，需要在Dashboard Service内容加入nodePort： 30001和type: NodePort两项内容，将Dashboard访问端口映射为节点端口，以供外部访问
 
-## 14、节点node加入（默认此事上面一步骤 都进行了操作）
+![1565365905753](C:\Users\yanjiny\AppData\Roaming\Typora\typora-user-images\1565365905753.png)
 
-```shell
-# 执行master 安装成功后的 kubeadm join命令 注意是你自己的，下面是举例
-kubeadm join --token r6vo99.ixkb27zv3o9e154m 192.168.233.129:6443 --discovery-token-ca-cert-hash sha256:0a2641c6af4e107c83022372bade060e526cb64aa768e9d15968ffe84ad9dcd3
+```yml
+# Copyright 2017 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ------------------- Dashboard Secret ------------------- #
+
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard-certs
+  namespace: kube-system
+type: Opaque
+
+---
+# ------------------- Dashboard Service Account ------------------- #
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kube-system
+
+---
+# ------------------- Dashboard Role & Role Binding ------------------- #
+
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: kubernetes-dashboard-minimal
+  namespace: kube-system
+rules:
+  # Allow Dashboard to create 'kubernetes-dashboard-key-holder' secret.
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create"]
+  # Allow Dashboard to create 'kubernetes-dashboard-settings' config map.
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create"]
+  # Allow Dashboard to get, update and delete Dashboard exclusive secrets.
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["kubernetes-dashboard-key-holder", "kubernetes-dashboard-certs"]
+  verbs: ["get", "update", "delete"]
+  # Allow Dashboard to get and update 'kubernetes-dashboard-settings' config map.
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["kubernetes-dashboard-settings"]
+  verbs: ["get", "update"]
+  # Allow Dashboard to get metrics from heapster.
+- apiGroups: [""]
+  resources: ["services"]
+  resourceNames: ["heapster"]
+  verbs: ["proxy"]
+- apiGroups: [""]
+  resources: ["services/proxy"]
+  resourceNames: ["heapster", "http:heapster:", "https:heapster:"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubernetes-dashboard-minimal
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubernetes-dashboard-minimal
+subjects:
+- kind: ServiceAccount
+  name: kubernetes-dashboard
+  namespace: kube-system
+
+---
+# ------------------- Dashboard Deployment ------------------- #
+
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kube-system
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      k8s-app: kubernetes-dashboard
+  template:
+    metadata:
+      labels:
+        k8s-app: kubernetes-dashboard
+    spec:
+      containers:
+      - name: kubernetes-dashboard
+        image: registry.cn-hangzhou.aliyuncs.com/lusifeng/kubernetes-dashboard-amd64:v1.10.1
+        ports:
+        - containerPort: 8443
+          protocol: TCP
+        args:
+          - --auto-generate-certificates
+          # Uncomment the following line to manually specify Kubernetes API server Host
+          # If not specified, Dashboard will attempt to auto discover the API server and connect
+          # to it. Uncomment only if the default does not work.
+          # - --apiserver-host=http://my-address:port
+        volumeMounts:
+        - name: kubernetes-dashboard-certs
+          mountPath: /certs
+          # Create on-disk volume to store exec logs
+        - mountPath: /tmp
+          name: tmp-volume
+        livenessProbe:
+          httpGet:
+            scheme: HTTPS
+            path: /
+            port: 8443
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+      volumes:
+      - name: kubernetes-dashboard-certs
+        secret:
+          secretName: kubernetes-dashboard-certs
+      - name: tmp-volume
+        emptyDir: {}
+      serviceAccountName: kubernetes-dashboard
+      # Comment the following tolerations if Dashboard must not be deployed on master
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+
+---
+# ------------------- Dashboard Service ------------------- #
+
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kube-system
+spec:
+  ports:
+    - port: 443
+      targetPort: 8443
+      nodePort：30001
+  type: NodePort
+  selector:
+    k8s-app: kubernetes-dashboard
+
 ```
 
-## 15、node 节点删除
+
+
+开始部署 
 
 ```shell
- kubectl drain k8s3 --delete-local-data --force --ignore-daemonsets
- kubectl delete node k8s3
+kubectl create -f kubernetes-dashboard.yaml
 ```
 
-## 16、主节点查看命令
+检查运行状态
 
 ```shell
-#命令一 
-kubectl get cs #显示内容如下说明Master安装没问题
-NAME                 STATUS    MESSAGE              ERROR
-scheduler            Healthy   ok                   
-controller-manager   Healthy   ok                   
-etcd-0               Healthy   {"health": "true"} 
-
-#命令二
-kubectl get pod -n kube-system #查看pod状态 下面只是部分pod内容
-NAME                                   READY   STATUS             RESTARTS   AGE
-coredns-86c58d9df4-j9g8d               1/1     Running            0          128m
-coredns-86c58d9df4-pg45w               1/1     Running            0          128m
-etcd-k8s1                              1/1     Running            0          127m
-kube-apiserver-k8s1                    1/1     Running            0          127m
-kube-controller-manager-k8s1           1/1     Running            0          127m
-
-
-#在这里你可能发现你的coredns 的状态并不是Running 不要着急，后面还有个配置，配置好就自动Running了
-
-#命令三
-kubectl get node #查看节点状态 
-NAME   STATUS   ROLES    AGE    VERSION
-k8s1   Ready    master   131m   v1.13.4
-k8s2   Ready    <none>   93m    v1.13.4
-
-#如果你添加了节点里面看的话 可能还未初始化，显示的是NoReady多等会儿。
+kubectl get deployment kubernetes-dashboard -n kube-system
+kubectl get pods -n kube-system -o wide
+kubectl get services -n kube-system
+netstat -ntlp|grep 30001
 ```
 
-## 17、安装Flannel 网络配置工具,用于配置第三层(网络层)网络结构 (只需要Master安装)
+查看访问Dashboard的认证令牌
 
 ```shell
-#如果是国内 通过执行yml无法直接下载的话执行下面命令
-docker pull registry.cn-shenzhen.aliyuncs.com/cp_m/flannel:v0.10.0-amd64
-docker tag registry.cn-shenzhen.aliyuncs.com/cp_m/flannel:v0.10.0-amd64 quay.io/coreos/flannel:v0.10.0-amd64
-docker rmi registry.cn-shenzhen.aliyuncs.com/cp_m/flannel:v0.10.0-amd64
+kubectl create serviceaccount  dashboard-admin -n kube-system
 
-#安装Flannel
+kubectl create clusterrolebinding  dashboard-admin --clusterrole=cluster-admin --serviceaccount=kube-system:dashboard-admin
 
-mkdir -p ~/k8s/
-cd k8s/
-ll
+kubectl describe secrets -n kube-system $(kubectl -n kube-system get secret | awk '/dashboard-admin/{print $1}')
+```
 
-wget https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+![1565366076416](C:\Users\yanjiny\AppData\Roaming\Typora\typora-user-images\1565366076416.png)
 
-kubectl apply -f kube-flannel.yml
+使用火狐登陆
 
-#安装成功后查看pod
+![1565366139362](C:\Users\yanjiny\AppData\Roaming\Typora\typora-user-images\1565366139362.png)
+
+## 14、
+
+```shell
+wget https://raw.githubusercontent.com/kubernetes/heapster/master/deploy/kube-config/influxdb/grafana.yaml
+wget https://raw.githubusercontent.com/kubernetes/heapster/master/deploy/kube-config/rbac/heapster-rbac.yaml
+wget https://raw.githubusercontent.com/kubernetes/heapster/master/deploy/kube-config/influxdb/heapster.yaml
+wget https://raw.githubusercontent.com/kubernetes/heapster/master/deploy/kube-config/influxdb/influxdb.yaml
+
+#修改镜像地址
+
+
+```
+
+## 15、部署仪表盘
+
+```shell
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.0.0-beta1/aio/deploy/recommended.yaml
+```
+
+
+
+
+
+## 14、常用命令
+
+```shell
+#查看pod状态
 kubectl get pod -n kube-system
-NAME                                   READY   STATUS             RESTARTS   AGE
-coredns-86c58d9df4-j9g8d               1/1     Running            0          128m
-coredns-86c58d9df4-pg45w               1/1     Running            0          128m
-etcd-k8s1                              1/1     Running            0          127m
-kube-apiserver-k8s1                    1/1     Running            0          127m
-kube-controller-manager-k8s1           1/1     Running            0          127m
-kube-flannel-ds-amd64-7btlw            1/1     Running            0          91m
-kube-flannel-ds-amd64-9vq42            1/1     Running            0          106m
-kube-flannel-ds-amd64-kdf42            1/1     Running            0          90m
-kube-proxy-dtmfs                       1/1     Running            0          128m
-kube-proxy-p76tc                       1/1     Running            0          90m
-kube-proxy-xgw28                       1/1     Running            0          91m
-kube-scheduler-k8s1                    1/1     Running            0          128m
+[root@k8s1 home]# kubectl get pod -n kube-system
+NAME                                   READY   STATUS              RESTARTS   AGE
+coredns-5c98db65d4-ldxvx               1/1     Running             2          6h47m
+coredns-5c98db65d4-lvcb5               1/1     Running             2          6h47m
+etcd-k8s1                              1/1     Running             5          6h47m
+heapster-598cfcfd59-dbrd5              0/1     RunContainerError   0          55m
+kube-apiserver-k8s1                    1/1     Running             5          6h47m
+kube-controller-manager-k8s1           1/1     Running             47         6h47m
+kube-flannel-ds-amd64-2lxxm            1/1     Running             1          134m
+kube-flannel-ds-amd64-cc76p            1/1     Running             1          134m
+kube-flannel-ds-amd64-fdhzg            1/1     Running             2          175m
+kube-proxy-4rm74                       1/1     Running             5          6h47m
+kube-proxy-6r96t                       1/1     Running             2          134m
+kube-proxy-n7bgz                       1/1     Running             1          134m
+kube-scheduler-k8s1                    1/1     Running             40         6h46m
+monitoring-grafana-68b7968bd4-tnkh2    1/1     Running             0          55m
+monitoring-influxdb-68b6989bb9-zdthd   1/1     Running             0          55m
 
-#全部Running则表示 成功了
 
-#如果发现哪一项的STATUS的状态不是Running,执行如下命令
-kubectl describe pod  [这里是复制上面的Name列] -n kube-system 
-
-#这里会看到具体的错误内容，然后根据提示进行解决。
+#查看节点日志
+kubectl -n kube-system describe pod <name>
 ```
 
