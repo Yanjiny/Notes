@@ -225,7 +225,7 @@ service mysql start
 # 操作mysql数据库
 mysql> use mysql;
 # 修改密码
-mysql> UPDATE user SET Password=PASSWORD('P@ssw0rdNP') where USER='root';
+mysql> UPDATE user SET Password=PASSWORD('password') where USER='root';
 mysql> flush privileges;
 mysql> exit;
 ```
