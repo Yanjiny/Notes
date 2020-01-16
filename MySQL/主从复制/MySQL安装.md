@@ -73,7 +73,7 @@ port=3306
 character-set-server=utf8
 ## 同一局域网内注意要唯一
 server-id=210  
-## 开启二进制日志功能，可以随便取（关键）
+## 开启二进制日志功能，可以随便取（关键）非主从配置要去掉此设置
 log-bin=mysql-bin
 # 取消密码验证
 skip-grant-tables
@@ -109,7 +109,7 @@ service mysql start
 
 ### 设置密码
 
-登录（由于/etc/my.cnf中设置了取消密码验证，所以此处密码任意）
+登录（由于/etc/my.cnf中设置了取消密码验证，所以此处密码任意）非主从配置要去掉此设置
 
 ```shell
 /usr/local/mysql/bin/mysql -u root -p
